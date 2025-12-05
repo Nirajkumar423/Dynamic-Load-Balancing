@@ -291,31 +291,67 @@ function App() {
     // Save current state before making changes
     saveStateSnapshot();
 
-    // Try to assign a task first
-    if (taskQueue.length > 0) {
-      const task = taskQueue[0];
-      const canAssign = servers.some(
-        (s) => s.load + task.weight <= s.maxCapacity
-      );
+    // Use refs to get latest values to avoid stale closures
+    const currentQueue = taskQueueRef.current;
+    const currentServers = serversRef.current;
 
-      if (canAssign) {
-        assignTaskToServer(task, true);
+    // Try to assign a task first
+    if (currentQueue.length > 0) {
+      const task = currentQueue[0];
+      const sortedServers = [...currentServers].sort((a, b) => a.load - b.load);
+      const targetServer = sortedServers[0];
+
+      // Check if task can fit
+      if (targetServer.load + task.weight <= targetServer.maxCapacity) {
+        const loadBefore = targetServer.load;
+        const loadAfter = targetServer.load + task.weight;
+        const loadBeforePercent = (loadBefore / targetServer.maxCapacity) * 100;
+        const loadAfterPercent = (loadAfter / targetServer.maxCapacity) * 100;
+
+        // Log the assignment
+        const timestamp = new Date().toLocaleTimeString();
+        setAssignmentLog((prevLog) => [
+          {
+            timestamp,
+            taskId: task.id,
+            taskWeight: task.weight,
+            serverId: targetServer.id,
+            loadBefore: loadBeforePercent.toFixed(1),
+            loadAfter: loadAfterPercent.toFixed(1),
+            status: 'assigned',
+          },
+          ...prevLog,
+        ]);
+
+        // Update server with new task
+        setServers((prevServers) =>
+          prevServers.map((server) =>
+            server.id === targetServer.id
+              ? {
+                  ...server,
+                  load: server.load + task.weight,
+                  tasks: [...server.tasks, task],
+                }
+              : server
+          )
+        );
+
+        // Remove task from queue
         setTaskQueue((prevQueue) => prevQueue.slice(1));
+
         setStats((prev) => ({
           ...prev,
           totalTasks: prev.totalTasks + 1,
         }));
+
         return true;
       }
     }
 
-    // Try to complete tasks if no assignment possible
-    let taskCompleted = false;
-    setServers((prevServers) => {
-      return prevServers.map((server) => {
-        if (server.tasks.length === 0) return server;
-
-        // Try to complete one task (deterministic - complete first task)
+    // Try to complete one task if no assignment possible
+    // Find first server with tasks
+    for (const server of currentServers) {
+      if (server.tasks.length > 0) {
         const taskToComplete = server.tasks[0];
         const remainingTasks = server.tasks.slice(1);
         const loadReduction = taskToComplete.weight;
@@ -345,18 +381,25 @@ function App() {
           completedTasks: prev.completedTasks + 1,
         }));
 
-        taskCompleted = true;
+        // Update server by removing completed task
+        setServers((prevServers) =>
+          prevServers.map((s) =>
+            s.id === server.id
+              ? {
+                  ...s,
+                  load: loadAfter,
+                  tasks: remainingTasks,
+                }
+              : s
+          )
+        );
 
-        return {
-          ...server,
-          load: loadAfter,
-          tasks: remainingTasks,
-        };
-      });
-    });
+        return true;
+      }
+    }
 
-    return taskCompleted;
-  }, [isRunning, taskQueue, servers, assignTaskToServer, saveStateSnapshot]);
+    return false;
+  }, [isRunning, saveStateSnapshot]);
 
   // Navigate to previous step
   const goToPreviousStep = useCallback(() => {
@@ -383,12 +426,14 @@ function App() {
 
   // Navigate to next step (if we went back)
   const goToNextStep = useCallback(() => {
-    if (currentStepIndex >= stateHistory.length - 1) {
+    // If we're at the latest state (or before any state), execute next step
+    if (currentStepIndex < 0 || currentStepIndex >= stateHistory.length - 1) {
       // We're at the latest state, execute next step
       executeNextStep();
       return;
     }
 
+    // Otherwise, navigate to the next state in history
     const nextIndex = currentStepIndex + 1;
     const nextState = stateHistory[nextIndex];
 
@@ -414,6 +459,8 @@ function App() {
     const avgLoad = totalLoad / servers.length;
     setStats((prev) => ({ ...prev, averageLoad: avgLoad }));
   }, [servers]);
+
+  // Removed automatic execution - simulation now only advances via Next Step button
 
   const addTask = () => {
     const weight = Math.floor(Math.random() * 30) + 10; // Random weight between 10-40
